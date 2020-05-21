@@ -12,9 +12,7 @@ all:	src/libart.so
 src/libart.so:	src/libart.o
 	$(LD) $(SHLINKFLAGS) -o $@ $<
 
-src/art.c:	src/art.h
-
-src/libart.o:	src/art.c
+src/libart.o:	src/art.c src/art.h
 	$(CC) $(SHCFLAGS) -o $@ -c $<
 
 install:	src/libart.so

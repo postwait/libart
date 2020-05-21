@@ -154,6 +154,7 @@ static art_node** find_child(art_node *n, unsigned char c) {
 
         {
         case NODE16:
+            assert(n->num_children <= 16);
             p.p2 = (art_node16*)n;
 
             // support non-86 architectures
@@ -201,8 +202,10 @@ static art_node** find_child(art_node *n, unsigned char c) {
         }
 
         case NODE48:
+            assert(n->num_children <= 48);
             p.p3 = (art_node48*)n;
             i = p.p3->keys[c];
+            assert(i <= 48);
             if (i)
                 return &p.p3->children[i-1];
             break;

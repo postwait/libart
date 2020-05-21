@@ -31,9 +31,9 @@ typedef int(*art_callback)(void *data, const unsigned char *key, uint32_t key_le
  * of all the various node sizes
  */
 typedef struct {
+    uint32_t partial_len;
     uint8_t type;
     uint8_t num_children;
-    uint32_t partial_len;
     unsigned char partial[MAX_PREFIX_LEN];
 } art_node;
 
@@ -83,12 +83,25 @@ typedef struct {
     unsigned char key[];
 } art_leaf;
 
+typedef ssize_t (*art_value_serialize_f)(void *closure, void *value,
+                                         unsigned char *tgt, size_t tgt_len);
+typedef void *  (*art_value_deserialize_f)(void *closure, unsigned char *src, size_t src_len);
+typedef void    (*art_value_release_f)(void *closure, void *value);
+
+typedef struct {
+    art_value_serialize_f serialize;
+    art_value_deserialize_f deserialize;
+    art_value_release_f release;
+} art_tree_interposition_t;
+
 /**
  * Main struct, points to root.
  */
 typedef struct {
     art_node *root;
     uint64_t size;
+    uintptr_t base;
+    art_tree_interposition_t *ops;
 } art_tree;
 
 /**
@@ -103,6 +116,14 @@ int art_tree_init(art_tree *t);
  * @return 0 on success.
  */
 #define init_art_tree(...) art_tree_init(__VA_ARGS__)
+
+/**
+ * Sets interposition operations for an ART
+ * @arg t The tree
+ * @arg base An alternative base address
+ * @arg ops Interposition operations
+ */
+void art_tree_interpose(art_tree *t, uintptr_t base, art_tree_interposition_t *ops);
 
 /**
  * Destroys an ART tree
@@ -169,6 +190,13 @@ void* art_delete(art_tree *t, const unsigned char *key, int key_len);
  * the value pointer is returned.
  */
 void* art_search(const art_tree *t, const unsigned char *key, int key_len);
+
+/**
+ * Releases a value returned from search back into the ART tree
+ * @arg t The tree
+ * @arg value A value returned from art_search()
+ */
+void art_release(const art_tree *t, void *value);
 
 /**
  * Returns the minimum valued leaf
