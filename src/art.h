@@ -1,4 +1,6 @@
 #include <stdint.h>
+#include <unistd.h>
+#include <stdbool.h>
 #ifndef ART_H
 #define ART_H
 
@@ -38,12 +40,17 @@ typedef struct {
 } art_node;
 
 /**
+ * This is a pointer-invariant stub for type-safety
+ */
+typedef struct art_pin art_pin;
+
+/**
  * Small node with only 4 children
  */
 typedef struct {
     art_node n;
     unsigned char keys[4];
-    art_node *children[4];
+    art_pin *children[4];
 } art_node4;
 
 /**
@@ -52,7 +59,7 @@ typedef struct {
 typedef struct {
     art_node n;
     unsigned char keys[16];
-    art_node *children[16];
+    art_pin *children[16];
 } art_node16;
 
 /**
@@ -62,7 +69,7 @@ typedef struct {
 typedef struct {
     art_node n;
     unsigned char keys[256];
-    art_node *children[48];
+    art_pin *children[48];
 } art_node48;
 
 /**
@@ -70,7 +77,7 @@ typedef struct {
  */
 typedef struct {
     art_node n;
-    art_node *children[256];
+    art_pin *children[256];
 } art_node256;
 
 /**
@@ -83,26 +90,36 @@ typedef struct {
     unsigned char key[];
 } art_leaf;
 
-typedef ssize_t (*art_value_serialize_f)(void *closure, void *value,
+typedef struct art_tree art_tree;
+
+typedef void *  (*art_alloc_f)(void *closure, const art_tree *, size_t);
+typedef void    (*art_free_f)(void *closure, const art_tree *, void *);
+typedef ssize_t (*art_value_serialize_f)(void *closure, const art_tree *t, void *value,
                                          unsigned char *tgt, size_t tgt_len);
-typedef void *  (*art_value_deserialize_f)(void *closure, unsigned char *src, size_t src_len);
-typedef void    (*art_value_release_f)(void *closure, void *value);
+typedef void *  (*art_value_deserialize_f)(void *closure, const art_tree *t, unsigned char *src, size_t src_len);
+typedef void    (*art_value_release_f)(void *closure, const art_tree *t, void *value);
 
 typedef struct {
     art_value_serialize_f serialize;
     art_value_deserialize_f deserialize;
     art_value_release_f release;
+    art_alloc_f alloc;
+    art_free_f free;
+    bool read_only;
 } art_tree_interposition_t;
+
+typedef struct art_serializer art_serializer_t;
 
 /**
  * Main struct, points to root.
  */
-typedef struct {
-    art_node *root;
-    uint64_t size;
-    uintptr_t base;
-    art_tree_interposition_t *ops;
-} art_tree;
+struct art_tree {
+    art_pin                  *root;       /* The root of the tree (relative to base) */
+    uint64_t                  size;       /* number of elements in the tree */
+    art_serializer_t         *ser;
+    art_tree_interposition_t *ops;        /* operations */
+    void *ops_closure;
+};
 
 /**
  * Initializes an ART tree
@@ -120,10 +137,11 @@ int art_tree_init(art_tree *t);
 /**
  * Sets interposition operations for an ART
  * @arg t The tree
- * @arg base An alternative base address
+ * @arg ser An alternative serializer
  * @arg ops Interposition operations
+ * @arg closure Closure for interposer
  */
-void art_tree_interpose(art_tree *t, uintptr_t base, art_tree_interposition_t *ops);
+void art_tree_interpose(art_tree *t, art_serializer_t *, art_tree_interposition_t *ops, void *closure);
 
 /**
  * Destroys an ART tree
@@ -235,6 +253,12 @@ int art_iter(art_tree *t, art_callback cb, void *data);
  * @return 0 on success, or the return of the callback.
  */
 int art_iter_prefix(art_tree *t, const unsigned char *prefix, int prefix_len, art_callback cb, void *data);
+
+art_serializer_t *art_serializer_new(const char *file, bool create);
+
+#define ART_DEFAULT_OFFSET 8
+bool art_serializer_write_tree(art_serializer_t *, const art_tree *in, art_tree *dt, art_tree_interposition_t *ops, void *closure, size_t *offset);
+bool art_serializer_tree_at_offset(art_serializer_t *, art_tree *dt, size_t offset, art_tree_interposition_t *ops, void *closure);
 
 #ifdef __cplusplus
 }
