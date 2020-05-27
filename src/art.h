@@ -12,6 +12,8 @@ extern "C" {
 #define NODE16  2
 #define NODE48  3
 #define NODE256 4
+#define ART_SER_COMPLETE 1
+#define ART_SER_HDR_LEN  8
 
 #define MAX_PREFIX_LEN 10
 
@@ -92,11 +94,18 @@ typedef struct {
 
 typedef struct art_tree art_tree;
 
+typedef struct file_serializer {
+  int fd;
+  size_t offset;
+  uintptr_t base;
+  bool mapped;
+} file_serializer_t;
+
 typedef void *  (*art_alloc_f)(void *closure, const art_tree *, size_t);
 typedef void    (*art_free_f)(void *closure, const art_tree *, void *);
 typedef ssize_t (*art_value_serialize_f)(void *closure, const art_tree *t, void *value,
-                                         unsigned char *tgt, size_t tgt_len);
-typedef void *  (*art_value_deserialize_f)(void *closure, const art_tree *t, unsigned char *src, size_t src_len);
+                                         uint64_t (*writef)(file_serializer_t *, const void *tgt, size_t tgt_len), file_serializer_t *);
+typedef void *  (*art_value_deserialize_f)(void *closure, const art_tree *t, const void *src);
 typedef void    (*art_value_release_f)(void *closure, const art_tree *t, void *value);
 
 typedef struct {
@@ -108,15 +117,13 @@ typedef struct {
     bool read_only;
 } art_tree_interposition_t;
 
-typedef struct art_serializer art_serializer_t;
-
 /**
  * Main struct, points to root.
  */
 struct art_tree {
     art_pin                  *root;       /* The root of the tree (relative to base) */
     uint64_t                  size;       /* number of elements in the tree */
-    art_serializer_t         *ser;
+    file_serializer_t        *ser;
     art_tree_interposition_t *ops;        /* operations */
     void *ops_closure;
 };
@@ -141,7 +148,7 @@ int art_tree_init(art_tree *t);
  * @arg ops Interposition operations
  * @arg closure Closure for interposer
  */
-void art_tree_interpose(art_tree *t, art_serializer_t *, art_tree_interposition_t *ops, void *closure);
+void art_tree_interpose(art_tree *t, file_serializer_t *, art_tree_interposition_t *ops, void *closure);
 
 /**
  * Destroys an ART tree
@@ -254,11 +261,16 @@ int art_iter(art_tree *t, art_callback cb, void *data);
  */
 int art_iter_prefix(art_tree *t, const unsigned char *prefix, int prefix_len, art_callback cb, void *data);
 
-art_serializer_t *art_serializer_new(const char *file, bool create);
+file_serializer_t *art_serializer_new(const char *file, bool create);
+bool art_serializer_finalize(file_serializer_t *ser, uint32_t flags);
+void art_serializer_destroy(file_serializer_t *ser);
+
+const void *art_serializer_offset_to_address(file_serializer_t *, uintptr_t offset);
 
 #define ART_DEFAULT_OFFSET 8
-bool art_serializer_write_tree(art_serializer_t *, const art_tree *in, art_tree *dt, art_tree_interposition_t *ops, void *closure, size_t *offset);
-bool art_serializer_tree_at_offset(art_serializer_t *, art_tree *dt, size_t offset, art_tree_interposition_t *ops, void *closure);
+bool art_serializer_write_tree(file_serializer_t *, const art_tree *in, art_tree_interposition_t *ops, void *closure, size_t *offset);
+bool art_serializer_tree_at_offset(file_serializer_t *, art_tree *dt, size_t offset, art_tree_interposition_t *ops, void *closure);
+uintptr_t art_serializer_write_custom(file_serializer_t *ser, const void *b, size_t l);
 
 #ifdef __cplusplus
 }

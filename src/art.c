@@ -29,13 +29,7 @@ const struct art_ser_hdr ART_SER_HDR = {
   .flags = 0
 };
 
-struct art_serializer {
-  int fd;
-  size_t offset;
-  uintptr_t base;
-};
-
-struct art_serializer self_image_ser = {
+struct file_serializer self_image_ser = {
   .fd = -1,
   .offset = 0,
   .base = 0,
@@ -46,11 +40,13 @@ struct art_serializer self_image_ser = {
  */
 #define WRITEALIGN 8
 #define MAX_ON_STACK (1<<16)
-#define ART_SER_COMPLETE 1
 #define IS_LEAF(x) (((uintptr_t)x & 1))
 #define SET_LEAF(x) ((void*)((uintptr_t)x | 1))
 #define LEAF_RAW(x) ((art_leaf*)((void*)((uintptr_t)x & ~1)))
 static inline art_node *PIN_2_NODE(const art_tree *t, art_pin *x) {
+    return ( x ? ((art_node *)((uintptr_t)x + t->ser->base)) : (art_node *)NULL );
+}
+static inline void *PIN_2_PTR(const art_tree *t, art_pin *x) {
     return ( x ? ((art_node *)((uintptr_t)x + t->ser->base)) : (art_node *)NULL );
 }
 static inline art_pin *NODE_2_PIN(const art_tree *t, art_node *x) {
@@ -115,7 +111,7 @@ int art_tree_init(art_tree *t) {
     return 0;
 }
 
-void art_tree_interpose(art_tree *t, art_serializer_t *ser, art_tree_interposition_t *ops, void *c) {
+void art_tree_interpose(art_tree *t, file_serializer_t *ser, art_tree_interposition_t *ops, void *c) {
     assert(t->size == 0);
     t->ser = ser ? ser : &self_image_ser;
     t->ops = ops;
@@ -338,6 +334,8 @@ void* art_search(const art_tree *t, const unsigned char *key, int key_len) {
             n = (art_node*)LEAF_RAW(n);
             // Check if the expanded path matches
             if (!leaf_matches((art_leaf*)n, key, key_len, depth)) {
+                if(t->ops->deserialize)
+                  return t->ops->deserialize(t->ops_closure, t, PIN_2_PTR(t, ((art_leaf*)n)->value));
                 return ((art_leaf*)n)->value;
             }
             return NULL;
@@ -912,6 +910,12 @@ static int recursive_iter(const art_tree *t, art_node *n, art_callback cb, void 
     if (!n) return 0;
     if (IS_LEAF(n)) {
         art_leaf *l = LEAF_RAW(n);
+        if(t->ops->deserialize) {
+          void *value = t->ops->deserialize(t->ops_closure, t, PIN_2_PTR(t, l->value));
+          int rc = cb(data, (const unsigned char*)l->key, l->key_len, value);
+          art_release(t, value);
+          return rc;
+        }
         return cb(data, (const unsigned char*)l->key, l->key_len, l->value);
     }
 
@@ -1004,6 +1008,12 @@ int art_iter_prefix(art_tree *t, const unsigned char *key, int key_len, art_call
             // Check if the expanded path matches
             if (!leaf_prefix_matches((art_leaf*)n, key, key_len)) {
                 art_leaf *l = (art_leaf*)n;
+                if(t->ops->deserialize) {
+                    void *value = t->ops->deserialize(t->ops_closure, t, PIN_2_PTR(t, l->value));
+                    int rc = cb(data, (const unsigned char*)l->key, l->key_len, value);
+                    art_release(t, value);
+                    return rc;
+                }
                 return cb(data, (const unsigned char*)l->key, l->key_len, l->value);
             }
             return 0;
@@ -1047,11 +1057,12 @@ int art_iter_prefix(art_tree *t, const unsigned char *key, int key_len, art_call
     return 0;
 }
 
-static uintptr_t write_to_pic(art_serializer_t *ser, unsigned char *buff, size_t len) {
+static uintptr_t write_to_pic(file_serializer_t *ser, const void *vbuff, size_t len) {
+  const unsigned char *buff = (unsigned char *)vbuff;
   static unsigned char pad[WRITEALIGN] = { 0 };
   size_t pad_len = len % WRITEALIGN ? (WRITEALIGN - ( len % WRITEALIGN )) : 0;
   struct iovec alignedout[2] = {
-    { .iov_base = buff, .iov_len = len },
+    { .iov_base = (void *)buff, .iov_len = len },
     { .iov_base = pad, .iov_len = pad_len }
   };
   ssize_t written;
@@ -1062,7 +1073,7 @@ static uintptr_t write_to_pic(art_serializer_t *ser, unsigned char *buff, size_t
   ser->offset += written;
   return offset;
 }
-static bool serialize_tree_as_pic(const art_tree *t, art_node *n, art_tree *dt, art_pin **ref, art_serializer_t *ser) {
+static bool serialize_tree_as_pic(const art_tree *t, art_node *n, art_tree *dt, art_pin **ref, file_serializer_t *ser) {
    // Break if null
     if (!n) {
       *ref = NULL;
@@ -1075,18 +1086,9 @@ static bool serialize_tree_as_pic(const art_tree *t, art_node *n, art_tree *dt, 
         uintptr_t offset;
         uintptr_t value = (uintptr_t)leaf->value;
         if(dt->ops->serialize) {
-          size_t slen;
-          slen = dt->ops->serialize(dt->ops_closure, dt, leaf->value, NULL, 0);
-          if(slen < 0) return false;
-          unsigned char buff[MAX_ON_STACK], *sptr = buff;
-          if(slen > MAX_ON_STACK) {
-            sptr = malloc(slen);
-          }
-          dt->ops->serialize(dt->ops_closure, dt, leaf->value, sptr, slen);
-          offset = write_to_pic(ser, sptr, slen);
-          if(offset == 0) return false;
-          value = offset;
-          if(sptr != buff) free(sptr);
+          ssize_t soff = dt->ops->serialize(dt->ops_closure, dt, leaf->value, write_to_pic, ser);
+          if(soff < 0) return false;
+          value = soff;
         }
         /* This is the value of the leaf */
         offset = write_to_pic(ser, (unsigned char *)&value, sizeof(value));
@@ -1111,13 +1113,16 @@ static bool serialize_tree_as_pic(const art_tree *t, art_node *n, art_tree *dt, 
         art_node48 n3;
         art_node256 n4;
     } towrite;
+    memset(&towrite, 0, sizeof(towrite));
+    copy_header(&towrite.n1.n, n);
+    towrite.n1.n.type = n->type;
+
     size_t towrite_len = 0;
     switch (n->type) {
         case NODE4:
             towrite_len = sizeof(towrite.n1);
-            memset(&towrite, 0, sizeof(towrite));
             p.p1 = (art_node4*)n;
-            copy_header(&towrite.n1.n, n);
+            memcpy(towrite.n1.keys, p.p1->keys, sizeof(p.p1->keys));
             for (i=0;i<n->num_children;i++) {
                 if(!serialize_tree_as_pic(t, PIN_2_NODE(t, p.p1->children[i]), dt, &towrite.n1.children[i], ser))
                     return false;
@@ -1126,8 +1131,8 @@ static bool serialize_tree_as_pic(const art_tree *t, art_node *n, art_tree *dt, 
 
         case NODE16:
             towrite_len = sizeof(towrite.n2);
-            memset(&towrite, 0, sizeof(towrite));
             p.p2 = (art_node16*)n;
+            memcpy(towrite.n2.keys, p.p2->keys, sizeof(p.p2->keys));
             for (i=0;i<n->num_children;i++) {
                 if(!serialize_tree_as_pic(t, PIN_2_NODE(t, p.p2->children[i]), dt, &towrite.n2.children[i], ser))
                     return false;
@@ -1136,8 +1141,8 @@ static bool serialize_tree_as_pic(const art_tree *t, art_node *n, art_tree *dt, 
 
         case NODE48:
             towrite_len = sizeof(towrite.n3);
-            memset(&towrite, 0, sizeof(towrite));
             p.p3 = (art_node48*)n;
+            memcpy(towrite.n3.keys, p.p3->keys, sizeof(p.p3->keys));
             for (i=0;i<256;i++) {
                 idx = ((art_node48*)n)->keys[i]; 
                 if (!idx) continue; 
@@ -1148,7 +1153,6 @@ static bool serialize_tree_as_pic(const art_tree *t, art_node *n, art_tree *dt, 
 
         case NODE256:
             towrite_len = sizeof(towrite.n4);
-            memset(&towrite, 0, sizeof(towrite));
             p.p4 = (art_node256*)n;
             for (i=0;i<256;i++) {
                 if (p.p4->children[i])
@@ -1166,12 +1170,33 @@ static bool serialize_tree_as_pic(const art_tree *t, art_node *n, art_tree *dt, 
     return true;
 }
 
-art_serializer_t *art_serializer_new(const char *filename, bool create) {
-    int fd = open(filename, create ? O_CREAT|O_EXCL|O_RDWR : O_RDONLY);
+void art_serializer_destroy(file_serializer_t *ser) {
+  if(ser->mapped) {
+    munmap((void *)ser->base, ser->offset);
+  }
+  if(ser->fd >= 0) close(ser->fd);
+  free(ser);
+}
+const void *art_serializer_offset_to_address(file_serializer_t *ser, uintptr_t offset) {
+  if(!ser->mapped) return NULL;
+  if(ser->base + offset < ser->base) return NULL;
+  return (void *)(ser->base + offset);
+}
+bool art_serializer_finalize(file_serializer_t *ser, uint32_t flags) {
+  int rv;
+  if(fdatasync(ser->fd) != 0) return false;
+  while((rv = pwrite(ser->fd, &flags, sizeof(flags), sizeof(uint32_t))) == -1 && errno == EINTR);
+  if(rv != sizeof(flags)) return false;
+  (void)fdatasync(ser->fd);
+  return true;
+}
+file_serializer_t *art_serializer_new(const char *filename, bool create) {
+    int fd = open(filename, create ? O_CREAT|O_EXCL|O_RDWR : O_RDONLY, 0640);
     if(fd < 0) return NULL;
-    art_serializer_t *ser = calloc(1, sizeof(*ser));
+    file_serializer_t *ser = calloc(1, sizeof(*ser));
     if(create) {
       if(write(fd, (void *)&ART_SER_HDR, sizeof(ART_SER_HDR)) == sizeof(ART_SER_HDR)) {
+        ser->fd = fd;
         ser->offset = sizeof(ART_SER_HDR);
         return ser;
       }
@@ -1181,34 +1206,47 @@ art_serializer_t *art_serializer_new(const char *filename, bool create) {
       if(read(fd, &hdr, sizeof(hdr)) == sizeof(hdr)) {
         if(memcmp(&hdr.hdr_ver, &ART_SER_HDR.hdr_ver, sizeof(hdr.hdr_ver)) == 0 &&
            hdr.flags & ART_SER_COMPLETE) {
-          ser->fd = fd;
-          return ser;
+          struct stat sb;
+          int rv;
+          while((rv = fstat(fd, &sb)) == -1 && errno == EINTR);
+          if(rv == 0) {
+            ser->fd = fd;
+            ser->offset = sb.st_size;
+            ser->base = (uintptr_t)mmap(0, ser->offset, PROT_READ, MAP_PRIVATE, fd, 0);
+            if(ser->base != (uintptr_t)MAP_FAILED) {
+              ser->mapped = true;
+              return ser;
+            }
+          }
         }
       }
     }
+    free(ser);
     close(fd);
     return NULL;
 }
 
-bool art_serializer_write_tree(art_serializer_t *ser, const art_tree *t, art_tree *dt,
+bool art_serializer_write_tree(file_serializer_t *ser, const art_tree *t,
                                art_tree_interposition_t *ops, void *closure, size_t *offset) {
-    art_tree_init(dt);
-    art_tree_interpose(dt, 0, ops, closure);
-    if(serialize_tree_as_pic(t, PIN_2_NODE(t, t->root), dt, &dt->root, ser)) {
-        void *base = mmap(NULL, ser->offset, PROT_READ, MAP_PRIVATE, ser->fd, 0);
-        if(base != MAP_FAILED) {
-            dt->ser = ser;
-            return dt;
-        }
+    art_tree dt;
+    art_tree_init(&dt);
+    art_tree_interpose(&dt, 0, ops, closure);
+    if(serialize_tree_as_pic(t, PIN_2_NODE(t, t->root), &dt, &dt.root, ser)) {
+        *offset = (uintptr_t)dt.root;
+        return true;
     }
-    return NULL;
+    return false;
 }
 
-bool art_serializer_tree_at_offset(art_serializer_t *ser, art_tree *dt, size_t offset,
+bool art_serializer_tree_at_offset(file_serializer_t *ser, art_tree *dt, size_t offset,
                                    art_tree_interposition_t *ops, void *closure) {
     art_tree_init(dt);
     art_tree_interpose(dt, ser, ops, closure);
     if(offset >= dt->ser->offset) return false;
     dt->root = (art_pin *)offset;
     return true;
+}
+
+uintptr_t art_serializer_write_custom(file_serializer_t *ser, const void *b, size_t l) {
+  return write_to_pic(ser, b, l);
 }
