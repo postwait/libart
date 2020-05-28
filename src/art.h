@@ -261,8 +261,8 @@ int art_iter(art_tree *t, art_callback cb, void *data);
  */
 int art_iter_prefix(art_tree *t, const unsigned char *prefix, int prefix_len, art_callback cb, void *data);
 
-file_serializer_t *art_serializer_new(const char *file, bool create);
-bool art_serializer_finalize(file_serializer_t *ser, uint32_t flags);
+file_serializer_t *art_serializer_new(const char *file, uint16_t version, bool create);
+bool art_serializer_finalize(file_serializer_t *ser, uint16_t flags);
 void art_serializer_destroy(file_serializer_t *ser);
 
 const void *art_serializer_offset_to_address(file_serializer_t *, uintptr_t offset);

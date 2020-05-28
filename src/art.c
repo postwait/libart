@@ -21,13 +21,17 @@
 
 struct art_ser_hdr {
     unsigned char hdr_ver[4];
-    uint32_t flags;
+    uint16_t version;
+    uint16_t flags;
 };
 
 const struct art_ser_hdr ART_SER_HDR = {
   .hdr_ver = { 'A', 'R', 'T', '\0' },
+  .version = 0,
   .flags = 0
 };
+
+#define ART_SER_FLAGS_OFFSET 6
 
 struct file_serializer self_image_ser = {
   .fd = -1,
@@ -1182,22 +1186,26 @@ const void *art_serializer_offset_to_address(file_serializer_t *ser, uintptr_t o
   if(ser->base + offset < ser->base) return NULL;
   return (void *)(ser->base + offset);
 }
-bool art_serializer_finalize(file_serializer_t *ser, uint32_t flags) {
+bool art_serializer_finalize(file_serializer_t *ser, uint16_t flags) {
   int rv;
   if(fdatasync(ser->fd) != 0) return false;
-  while((rv = pwrite(ser->fd, &flags, sizeof(flags), sizeof(uint32_t))) == -1 && errno == EINTR);
+  while((rv = pwrite(ser->fd, &flags, sizeof(flags), ART_SER_FLAGS_OFFSET)) == -1 && errno == EINTR);
   if(rv != sizeof(flags)) return false;
   (void)fdatasync(ser->fd);
   return true;
 }
-file_serializer_t *art_serializer_new(const char *filename, bool create) {
+file_serializer_t *art_serializer_new(const char *filename, uint16_t version, bool create) {
+    errno = 0;
     int fd = open(filename, create ? O_CREAT|O_EXCL|O_RDWR : O_RDONLY, 0640);
     if(fd < 0) return NULL;
     file_serializer_t *ser = calloc(1, sizeof(*ser));
     if(create) {
-      if(write(fd, (void *)&ART_SER_HDR, sizeof(ART_SER_HDR)) == sizeof(ART_SER_HDR)) {
+      struct art_ser_hdr hdr;
+      memcpy(&hdr, &ART_SER_HDR, sizeof(hdr));
+      hdr.version = version;
+      if(write(fd, (void *)&hdr, sizeof(hdr)) == sizeof(hdr)) {
         ser->fd = fd;
-        ser->offset = sizeof(ART_SER_HDR);
+        ser->offset = sizeof(hdr);
         return ser;
       }
     }
@@ -1205,6 +1213,7 @@ file_serializer_t *art_serializer_new(const char *filename, bool create) {
       struct art_ser_hdr hdr;
       if(read(fd, &hdr, sizeof(hdr)) == sizeof(hdr)) {
         if(memcmp(&hdr.hdr_ver, &ART_SER_HDR.hdr_ver, sizeof(hdr.hdr_ver)) == 0 &&
+           hdr.version == version &&
            hdr.flags & ART_SER_COMPLETE) {
           struct stat sb;
           int rv;
@@ -1218,6 +1227,8 @@ file_serializer_t *art_serializer_new(const char *filename, bool create) {
               return ser;
             }
           }
+        } else {
+          errno = EINVAL;
         }
       }
     }
