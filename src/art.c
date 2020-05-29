@@ -129,7 +129,7 @@ static void destroy_node(const art_tree *t, art_node *n) {
 
     // Special case leafs
     if (IS_LEAF(n)) {
-        free(LEAF_RAW(n));
+        t->ops->free(t->ops_closure, t, LEAF_RAW(n));
         return;
     }
 
@@ -178,7 +178,7 @@ static void destroy_node(const art_tree *t, art_node *n) {
     }
 
     // Free ourself on the way up
-    free(n);
+    t->ops->free(t->ops_closure, t, n);
 }
 
 /**
@@ -318,7 +318,7 @@ static int leaf_matches(const art_leaf *n, const unsigned char *key, int key_len
 }
 
 void art_release(const art_tree *t, void *v) {
-    if(t->ops->free) t->ops->free(t->ops_closure, t, v);
+    if(t->ops->release) t->ops->release(t->ops_closure, t, v);
 }
 /**
  * Searches for a value in the ART tree
@@ -474,7 +474,7 @@ static void add_child48(const art_tree *t, art_node48 *n, art_pin **ref, unsigne
         }
         copy_header((art_node*)new_node, (art_node*)n);
         *ref = NODE_2_PIN(t, (art_node*)new_node);
-        free(n);
+        t->ops->free(t->ops_closure, t, n);
         add_child256(t, new_node, ref, c, child);
     }
 }
@@ -542,7 +542,7 @@ static void add_child16(const art_tree *t, art_node16 *n, art_pin **ref, unsigne
         }
         copy_header((art_node*)new_node, (art_node*)n);
         *ref = NODE_2_PIN(t, (art_node*)new_node);
-        free(n);
+        t->ops->free(t->ops_closure, t, n);
         add_child48(t, new_node, ref, c, child);
     }
 }
@@ -574,7 +574,7 @@ static void add_child4(const art_tree *t, art_node4 *n, art_pin **ref, unsigned 
                 sizeof(unsigned char)*n->n.num_children);
         copy_header((art_node*)new_node, (art_node*)n);
         *ref = NODE_2_PIN(t, (art_node*)new_node);
-        free(n);
+        t->ops->free(t->ops_closure, t, n);
         add_child16(t, new_node, ref, c, child);
     }
 }
@@ -756,7 +756,7 @@ static void remove_child256(const art_tree *t, art_node256 *n, art_pin **ref, un
                 pos++;
             }
         }
-        free(n);
+        t->ops->free(t->ops_closure, t, n);
     }
 }
 
@@ -780,7 +780,7 @@ static void remove_child48(const art_tree *t, art_node48 *n, art_pin **ref, unsi
                 child++;
             }
         }
-        free(n);
+        t->ops->free(t->ops_closure, t, n);
     }
 }
 
@@ -796,7 +796,7 @@ static void remove_child16(const art_tree *t, art_node16 *n, art_pin **ref, art_
         copy_header((art_node*)new_node, (art_node*)n);
         memcpy(new_node->keys, n->keys, 4);
         memcpy(new_node->children, n->children, 4*sizeof(void*));
-        free(n);
+        t->ops->free(t->ops_closure, t, n);
     }
 }
 
@@ -827,7 +827,7 @@ static void remove_child4(const art_tree *t, art_node4 *n, art_pin **ref, art_pi
             child->partial_len += n->n.partial_len + 1;
         }
         *ref = NODE_2_PIN(t, child);
-        free(n);
+        t->ops->free(t->ops_closure, t, n);
     }
 }
 
@@ -902,7 +902,7 @@ void* art_delete(art_tree *t, const unsigned char *key, int key_len) {
     if (l) {
         t->size--;
         void *old = l->value;
-        free(l);
+        t->ops->free(t->ops_closure, t, l);
         return old;
     }
     return NULL;
